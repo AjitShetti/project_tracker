@@ -1,0 +1,25 @@
+[project]
+name = "project-tracker"
+version = "0.1.0"
+description = "Side Project Tracker API"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+    { name = "Ajit Shetti", email = "ajitpshetti@gmail.com" }
+]
+dependencies = [
+    "fastapi",
+    "mangum",
+    "pydantic",
+    "pydantic-settings",
+    "boto3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "uvicorn",
+    "pytest",
+    "httpx",
+    "moto[dynamodb]",
+    "ruff",
+]
