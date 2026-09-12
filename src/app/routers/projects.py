@@ -10,6 +10,7 @@ from app.models import (
     ProjectStatus,
     ProjectUpdate,
     ProjectWithLogsOut,
+    _normalise_status,
 )
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -34,10 +35,26 @@ def create_project(
     summary="List all projects (optional status filter)",
 )
 def list_projects(
-    status_filter: ProjectStatus | None = Query(default=None, alias="status"),
+    # Typed str, not ProjectStatus: FastAPI coerces a query parameter against
+    # its annotation before any validator of ours could widen the vocabulary, so
+    # "under review" would 422 here while being accepted on the body endpoints.
+    status_filter: str | None = Query(
+        default=None,
+        alias="status",
+        description="idea, active, paused, shipped or abandoned, or any accepted "
+        "synonym for one of them (see _STATUS_SYNONYMS).",
+    ),
     table: Any = Depends(get_table),
 ):
-    filter_val = status_filter.value if status_filter else None
+    filter_val = None
+    if status_filter:
+        try:
+            filter_val = ProjectStatus(_normalise_status(status_filter)).value
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"unknown status: {status_filter}",
+            ) from None
     return repository.list_projects(table, status_filter=filter_val)
 
 

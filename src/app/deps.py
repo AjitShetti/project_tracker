@@ -14,7 +14,17 @@ def verify_api_key(
     api_key: str | None = Security(api_key_header),
     settings: Settings = Depends(get_settings),
 ) -> str:
-    """Verify X-API-Key header using constant-time comparison."""
+    """Verify X-API-Key header using constant-time comparison.
+
+    An empty configured key disables the check outright, so a local run against
+    DynamoDB Local needs no header. That is only ever safe locally: an API
+    Gateway URL is public, and an open one leaves every project readable,
+    rewritable and DELETE-able by anyone who finds it. template.yaml keeps
+    MinLength: 16 on the ApiKey parameter, so CloudFormation refuses a deploy
+    that would land here - the asymmetry is deliberate.
+    """
+    if not settings.api_key:
+        return ""
     if not api_key or not hmac.compare_digest(api_key, settings.api_key):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

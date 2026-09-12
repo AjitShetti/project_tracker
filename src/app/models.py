@@ -12,11 +12,60 @@ class ProjectStatus(StrEnum):
     ABANDONED = "abandoned"
 
 
+# Words callers say, mapped onto the five states above. These are synonyms for
+# input only - nothing here becomes a stored value, and ProjectStatus stays at
+# five members. A voice client hears "under review" and "to build"; both mean
+# idea. Keeping the vocabulary here rather than in each client means curl, a
+# phone shortcut and the desktop app all accept the same words, and a new
+# synonym is one line in one place.
+_STATUS_SYNONYMS = {
+    "to_build": "idea",
+    "under_review": "idea",
+    "someday": "idea",
+    "maybe": "idea",
+    "backlog": "idea",
+    "planned": "idea",
+    "building": "active",
+    "in_progress": "active",
+    "wip": "active",
+    "started": "active",
+    "parked": "paused",
+    "shelved": "paused",
+    "on_hold": "paused",
+    "done": "shipped",
+    "live": "shipped",
+    "launched": "shipped",
+    "complete": "shipped",
+    "dead": "abandoned",
+    "dropped": "abandoned",
+    "killed": "abandoned",
+}
+
+
+def _normalise_status(value: object) -> object:
+    """Accept the words people say for the five states we store.
+
+    Only spelling is normalised here: case, spaces and hyphens are folded, then
+    a synonym is swapped for its canonical state. An unrecognised word is handed
+    back unchanged so enum validation still rejects it - this widens the
+    accepted vocabulary, it does not turn status into free text.
+    """
+    if not isinstance(value, str):
+        return value
+    key = value.strip().lower().replace(" ", "_").replace("-", "_")
+    return _STATUS_SYNONYMS.get(key, key)
+
+
 class LogCreate(BaseModel):
     """Schema for appending a log entry."""
 
     note: str = Field(..., min_length=1, max_length=2000, description="What was worked on")
-    hours_spent: float = Field(..., ge=0.0, description="Hours spent during this interval")
+    hours_spent: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Hours spent during this interval. Omit for a note that "
+        "records a thought rather than time worked.",
+    )
     created_at: datetime | None = Field(
         default=None,
         description="Optional ISO timestamp; defaults to current time",
@@ -52,6 +101,19 @@ class ProjectCreate(BaseModel):
     )
     repo_url: str | None = Field(default=None, max_length=500, description="Repository link")
     live_url: str | None = Field(default=None, max_length=500, description="Live deployment link")
+    client_token: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Caller-generated id. Retrying with the same token returns "
+        "the existing project instead of creating a second one.",
+    )
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _accept_synonyms(cls, value: object) -> object:
+        # mode="before" so this runs ahead of enum coercion - by the time a
+        # plain validator sees the value, "under review" has already 422'd.
+        return _normalise_status(value)
 
 
 class ProjectUpdate(BaseModel):
@@ -69,6 +131,15 @@ class ProjectUpdate(BaseModel):
     tech_stack: list[str] | None = None
     repo_url: str | None = Field(default=None, max_length=500)
     live_url: str | None = Field(default=None, max_length=500)
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _accept_synonyms(cls, value: object) -> object:
+        # mode="before" so this runs ahead of enum coercion - by the time a
+        # plain validator sees the value, "done" has already 422'd. A null falls
+        # straight through to _reject_explicit_null below, which still refuses
+        # it: normalising the vocabulary must not make status clearable.
+        return _normalise_status(value)
 
     @field_validator("name", "status", "tech_stack")
     @classmethod

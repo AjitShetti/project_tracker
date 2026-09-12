@@ -1,3 +1,6 @@
+from app.keys import project_pk, project_sk
+
+
 def test_health_endpoints(client):
     """Health check endpoints must be accessible without authentication."""
     resp1 = client.get("/health")
@@ -211,3 +214,193 @@ def test_update_project_rejects_null_on_required_attribute(client, auth_headers)
         client.get(f"/api/v1/projects/{project_id}", headers=auth_headers).json()["name"]
         == "Keeps its name"
     )
+
+
+def test_create_project_is_idempotent_per_client_token(client, auth_headers):
+    """A retried POST must not leave the user with two identical projects.
+
+    This is the failure the desktop client's outbox actually hits: the item is
+    written, the response times out at the gateway, and the flush retries.
+    """
+    payload = {"name": "Captured from the outbox", "client_token": "outbox-0001"}
+
+    first = client.post("/api/v1/projects", json=payload, headers=auth_headers)
+    second = client.post("/api/v1/projects", json=payload, headers=auth_headers)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["project_id"] == second.json()["project_id"]
+    assert second.json()["name"] == payload["name"]
+
+    listed = client.get("/api/v1/projects", headers=auth_headers)
+    assert listed.status_code == 200
+    assert len(listed.json()) == 1
+
+
+def test_different_client_tokens_create_distinct_projects(client, auth_headers):
+    """The token is the identity, not the name - same name twice is still two."""
+    for token in ("outbox-0001", "outbox-0002"):
+        resp = client.post(
+            "/api/v1/projects",
+            json={"name": "Same name on purpose", "client_token": token},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201
+
+    listed = client.get("/api/v1/projects", headers=auth_headers).json()
+    assert len(listed) == 2
+    assert len({p["project_id"] for p in listed}) == 2
+
+
+def test_create_project_without_client_token_is_unchanged(client, auth_headers):
+    """No token means no idempotency: ids stay random and duplicates are allowed."""
+    payload = {"name": "No token here"}
+
+    first = client.post("/api/v1/projects", json=payload, headers=auth_headers)
+    second = client.post("/api/v1/projects", json=payload, headers=auth_headers)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["project_id"] != second.json()["project_id"]
+    assert len(client.get("/api/v1/projects", headers=auth_headers).json()) == 2
+
+
+def test_client_token_is_not_exposed_in_responses(client, auth_headers):
+    """ProjectOut deliberately omits client_token - it is the caller's own id."""
+    created = client.post(
+        "/api/v1/projects",
+        json={"name": "Token stays internal", "client_token": "outbox-0003"},
+        headers=auth_headers,
+    )
+    assert created.status_code == 201
+    assert "client_token" not in created.json()
+
+    project_id = created.json()["project_id"]
+    fetched = client.get(f"/api/v1/projects/{project_id}", headers=auth_headers)
+    assert fetched.status_code == 200
+    assert "client_token" not in fetched.json()
+    assert "client_token" not in client.get("/api/v1/projects", headers=auth_headers).json()[0]
+
+
+def test_create_accepts_spoken_status_synonyms(client, auth_headers):
+    """Speech produces "under review"; the five stored states must not grow."""
+    resp = client.post(
+        "/api/v1/projects",
+        json={"name": "Heard over the microphone", "status": "under review"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201
+    assert resp.json()["status"] == "idea"
+
+
+def test_status_synonyms_ignore_case_and_separators(client, auth_headers):
+    """ "to_build", "To Build" and "to-build" are one word to a voice client."""
+    for spoken in ("to_build", "To Build", "to-build", "  TO BUILD  "):
+        resp = client.post(
+            "/api/v1/projects",
+            json={"name": f"Spoken as {spoken}", "status": spoken},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201, spoken
+        assert resp.json()["status"] == "idea", spoken
+
+
+def test_patch_status_synonym_rewrites_the_gsi_sort_key(dynamodb_mock, client, auth_headers):
+    """A normalised status must reach GSI1SK, or the status filter goes stale."""
+    created = client.post(
+        "/api/v1/projects",
+        json={"name": "Finished by voice", "status": "building"},
+        headers=auth_headers,
+    ).json()
+    assert created["status"] == "active"
+    project_id = created["project_id"]
+
+    patched = client.patch(
+        f"/api/v1/projects/{project_id}",
+        json={"status": "done"},
+        headers=auth_headers,
+    )
+    assert patched.status_code == 200
+    assert patched.json()["status"] == "shipped"
+
+    item = dynamodb_mock.get_item(
+        Key={"PK": project_pk(project_id), "SK": project_sk()},
+    )["Item"]
+    assert item["GSI1SK"] == f"shipped#{item['updated_at']}"
+
+    # The rewritten key is what the status filter queries, so it must agree.
+    listed = client.get("/api/v1/projects?status=shipped", headers=auth_headers).json()
+    assert [p["project_id"] for p in listed] == [project_id]
+
+
+def test_list_filter_accepts_status_synonyms(client, auth_headers):
+    """?status=under+review has to mean the same thing as ?status=idea."""
+    for name, spoken in (("An idea", "someday"), ("Shipped thing", "launched")):
+        client.post(
+            "/api/v1/projects",
+            json={"name": name, "status": spoken},
+            headers=auth_headers,
+        )
+
+    filtered = client.get("/api/v1/projects?status=under+review", headers=auth_headers)
+    assert filtered.status_code == 200
+    assert [p["name"] for p in filtered.json()] == ["An idea"]
+
+    assert [
+        p["name"] for p in client.get("/api/v1/projects?status=idea", headers=auth_headers).json()
+    ] == ["An idea"]
+
+
+def test_unknown_status_word_is_still_rejected(client, auth_headers):
+    """Widening the vocabulary must not turn status into a free-text field."""
+    create = client.post(
+        "/api/v1/projects",
+        json={"name": "Not a status", "status": "banana"},
+        headers=auth_headers,
+    )
+    assert create.status_code == 422
+
+    project_id = client.post(
+        "/api/v1/projects",
+        json={"name": "Valid project"},
+        headers=auth_headers,
+    ).json()["project_id"]
+
+    patch = client.patch(
+        f"/api/v1/projects/{project_id}",
+        json={"status": "banana"},
+        headers=auth_headers,
+    )
+    assert patch.status_code == 422
+
+    listed = client.get("/api/v1/projects?status=banana", headers=auth_headers)
+    assert listed.status_code == 422
+    assert "banana" in listed.json()["detail"]
+
+
+def test_canonical_status_values_are_unaffected(client, auth_headers):
+    """The five stored states keep working on create, patch and filter."""
+    canonical = ("idea", "active", "paused", "shipped", "abandoned")
+
+    for value in canonical:
+        created = client.post(
+            "/api/v1/projects",
+            json={"name": f"Project {value}", "status": value},
+            headers=auth_headers,
+        )
+        assert created.status_code == 201, value
+        assert created.json()["status"] == value, value
+
+        project_id = created.json()["project_id"]
+        patched = client.patch(
+            f"/api/v1/projects/{project_id}",
+            json={"status": value},
+            headers=auth_headers,
+        )
+        assert patched.status_code == 200, value
+        assert patched.json()["status"] == value, value
+
+    for value in canonical:
+        filtered = client.get(f"/api/v1/projects?status={value}", headers=auth_headers)
+        assert filtered.status_code == 200, value
+        assert [p["name"] for p in filtered.json()] == [f"Project {value}"], value

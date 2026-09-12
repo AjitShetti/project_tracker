@@ -4,10 +4,13 @@ DynamoDB page boundaries and conditional-write failures need a table stub,
 because moto will happily return everything in one page and never collide.
 """
 
+import hashlib
+
 import pytest
 from botocore.exceptions import ClientError
 
 from app import repository
+from app.keys import project_pk, project_sk
 
 
 def _conditional_check_failed() -> ClientError:
@@ -127,3 +130,56 @@ def test_create_project_gives_up_rather_than_overwriting():
 
     with pytest.raises(RuntimeError, match="unique project_id"):
         repository.create_project(table, {"name": "New", "status": "idea"})
+
+
+def test_create_project_abandons_a_token_whose_derived_id_is_taken(dynamodb_mock):
+    """A derived id can still collide with an unrelated project.
+
+    The condition fails exactly as it would for our own retry, so the stored
+    client_token is what tells the two apart. Handing back the squatter's item
+    would give the caller someone else's project, so we fall back to a random id
+    and leave that project alone.
+    """
+    token = "outbox-0001"
+    derived_id = hashlib.blake2s(token.encode(), digest_size=4).hexdigest()
+
+    dynamodb_mock.put_item(
+        Item={
+            "PK": project_pk(derived_id),
+            "SK": project_sk(),
+            "project_id": derived_id,
+            "name": "Squatter",
+            "status": "idea",
+            "client_token": "someone-elses-token",
+            "created_at": "2026-09-12T00:00:00+00:00",
+            "updated_at": "2026-09-12T00:00:00+00:00",
+        }
+    )
+
+    result = repository.create_project(
+        dynamodb_mock, {"name": "Mine", "status": "idea", "client_token": token}
+    )
+
+    assert result["name"] == "Mine"
+    assert result["project_id"] != derived_id
+    assert repository.get_project(dynamodb_mock, derived_id)["name"] == "Squatter"
+
+
+def test_create_project_returns_the_landed_write_on_retry(dynamodb_mock):
+    """Same token, same payload: the second call must not write a second item."""
+    payload = {"name": "Captured twice", "status": "idea", "client_token": "outbox-0002"}
+
+    first = repository.create_project(dynamodb_mock, dict(payload))
+    second = repository.create_project(dynamodb_mock, dict(payload))
+
+    assert first["project_id"] == second["project_id"]
+    assert len(repository.list_projects(dynamodb_mock)) == 1
+
+
+def test_create_project_does_not_mutate_the_payload_it_is_given(dynamodb_mock):
+    """The router's payload dict is the caller's; popping the token must not show."""
+    payload = {"name": "Untouched", "status": "idea", "client_token": "outbox-0003"}
+
+    repository.create_project(dynamodb_mock, payload)
+
+    assert payload["client_token"] == "outbox-0003"

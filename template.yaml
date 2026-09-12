@@ -7,6 +7,11 @@ Parameters:
     Type: String
     NoEcho: true
     Description: Shared secret for X-API-Key header authentication
+    # An empty API_KEY disables the header check, which is wanted for a local
+    # run against DynamoDB Local and never for a public API Gateway URL. There
+    # is deliberately no condition here allowing an empty value: CloudFormation
+    # rejects the deploy instead, so the open path cannot be reached by
+    # deploying. Do not relax this to make a deploy easier.
     MinLength: 16
   Environment:
     Type: String
@@ -15,8 +20,17 @@ Parameters:
 
 Globals:
   Function:
+    # Coupled to the desktop client's 20s client-side timeout: Lambda must give
+    # up first so a slow request surfaces as a clean 504 from API Gateway rather
+    # than an ambiguous abort on the client, which cannot tell a lost request
+    # from a lost reply. Change one of these two numbers and you must change the
+    # other.
     Timeout: 15
-    MemorySize: 512
+    # Lambda scales CPU with memory, so this is a cold-start setting, not a
+    # headroom setting: 1024 MB roughly halves FastAPI + mangum + boto3 import
+    # time (~2s -> ~1s). Duration billing is per GB-ms, so paying double the
+    # rate for half the time is close to cost-neutral.
+    MemorySize: 1024
     Runtime: python3.13
 
 Resources:
@@ -51,20 +65,14 @@ Resources:
             ProjectionType: ALL
 
   # HTTP API Gateway
+  #
+  # Deliberately no CorsConfiguration. The only client is a desktop Python
+  # process, which sends no Origin header and for which CORS does nothing.
+  # AllowOrigins "*" would not help it and would let any webpage in any open
+  # browser tab fetch() this API, DELETE included. If a browser client ever
+  # needs access, add it back with that specific origin - never a wildcard.
   ProjectTrackerApi:
     Type: AWS::Serverless::HttpApi
-    Properties:
-      CorsConfiguration:
-        AllowMethods:
-          - GET
-          - POST
-          - PATCH
-          - DELETE
-          - OPTIONS
-        AllowHeaders:
-          - "*"
-        AllowOrigins:
-          - "*"
 
   # Lambda Function
   ProjectTrackerFunction:

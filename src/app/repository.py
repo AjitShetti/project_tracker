@@ -5,6 +5,7 @@ Implements the 5 core access patterns using GetItem and Query exclusively.
 No Scan operations are used anywhere.
 """
 
+import hashlib
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -82,14 +83,31 @@ def create_project(table: Any, payload_data: dict[str, Any]) -> dict[str, Any]:
     project_id is a truncated UUID, so collisions are unlikely but possible. The
     conditional write makes a collision fail loudly instead of silently
     overwriting an existing project, and we simply try a fresh id.
+
+    A client_token in the payload makes the create idempotent: project_id is
+    derived from the token, so the retry of a POST whose item was written but
+    whose response never made it back lands on the same PK, fails the same
+    condition, and gets the already-stored project. Without it the caller cannot
+    tell a lost reply from a lost write, and retrying leaves the user with two
+    identical projects.
     """
     now_iso = _to_iso(datetime.now(UTC))
+
+    # Work on a copy - the caller owns the dict it passed in. client_token is an
+    # identity for the request, not a project attribute the payload loop builds.
+    payload_data = dict(payload_data)
+    token = payload_data.pop("client_token", None)
 
     status_val = payload_data.get("status")
     status_str = status_val.value if hasattr(status_val, "value") else str(status_val)
 
     for _ in range(MAX_ID_ATTEMPTS):
-        project_id = str(uuid.uuid4())[:8]
+        if token is not None:
+            # 4 bytes -> 8 hex chars: same id width, and the same collision
+            # profile, as the truncated uuid4 used when no token is supplied.
+            project_id = hashlib.blake2s(token.encode(), digest_size=4).hexdigest()
+        else:
+            project_id = str(uuid.uuid4())[:8]
         item = {
             "PK": project_pk(project_id),
             "SK": project_sk(),
@@ -102,6 +120,7 @@ def create_project(table: Any, payload_data: dict[str, Any]) -> dict[str, Any]:
             "tech_stack": payload_data.get("tech_stack", []),
             "repo_url": payload_data.get("repo_url"),
             "live_url": payload_data.get("live_url"),
+            "client_token": token,
             "created_at": now_iso,
             "updated_at": now_iso,
         }
@@ -116,6 +135,16 @@ def create_project(table: Any, payload_data: dict[str, Any]) -> dict[str, Any]:
         except ClientError as exc:
             if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
                 raise
+            if token is not None:
+                existing = get_project(table, project_id)
+                if existing is not None and existing.get("client_token") == token:
+                    # Our own earlier write landed; the reply is what got lost.
+                    return existing
+                # Something else already occupies the derived id - an ordinary
+                # 1-in-4-billion collision with an unrelated project, not our
+                # retry. Returning it would hand the caller someone else's
+                # record, so abandon the token and allocate randomly instead.
+                token = None
             continue  # id already taken - generate another one
         return _decimal_to_python(clean_item)
 

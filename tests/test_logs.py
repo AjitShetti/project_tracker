@@ -1,4 +1,7 @@
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+from app.keys import log_sk, project_pk
 
 
 def test_create_log_success(client, auth_headers):
@@ -135,3 +138,59 @@ def test_log_validation_errors(client, auth_headers):
         headers=auth_headers,
     )
     assert resp_empty.status_code == 422
+
+
+def test_create_log_without_hours_records_a_note(client, auth_headers):
+    """ "I had another thought about this" has no hours attached to report."""
+    project_id = client.post(
+        "/api/v1/projects",
+        json={"name": "Thoughts Project", "status": "active"},
+        headers=auth_headers,
+    ).json()["project_id"]
+
+    resp = client.post(
+        f"/api/v1/projects/{project_id}/logs",
+        json={"note": "Idea: cache the GSI1 query per cold start"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201
+    assert resp.json()["hours_spent"] == 0.0
+
+    listed = client.get(f"/api/v1/projects/{project_id}/logs", headers=auth_headers)
+    assert listed.status_code == 200
+    assert listed.json()[0]["hours_spent"] == 0.0
+
+    # The default must not have loosened the constraint it replaced.
+    negative = client.post(
+        f"/api/v1/projects/{project_id}/logs",
+        json={"note": "Impossible", "hours_spent": -0.5},
+        headers=auth_headers,
+    )
+    assert negative.status_code == 422
+
+
+def test_log_written_before_hours_became_optional_still_reads(dynamodb_mock, client, auth_headers):
+    """Logs stored while hours_spent was required must still deserialise."""
+    project_id = client.post(
+        "/api/v1/projects",
+        json={"name": "Has history", "status": "active"},
+        headers=auth_headers,
+    ).json()["project_id"]
+
+    created_at = "2026-09-01T09:00:00+00:00"
+    dynamodb_mock.put_item(
+        Item={
+            "PK": project_pk(project_id),
+            "SK": log_sk(created_at, "old00001"),
+            "log_id": "old00001",
+            "project_id": project_id,
+            "note": "Written under the old required-hours schema",
+            "hours_spent": Decimal("2.5"),
+            "created_at": created_at,
+        }
+    )
+
+    listed = client.get(f"/api/v1/projects/{project_id}/logs", headers=auth_headers)
+    assert listed.status_code == 200
+    assert listed.json()[0]["log_id"] == "old00001"
+    assert listed.json()[0]["hours_spent"] == 2.5
