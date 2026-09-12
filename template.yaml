@@ -1,0 +1,117 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Side Project Tracker API — FastAPI + DynamoDB single-table on AWS Lambda
+
+Parameters:
+  ApiKey:
+    Type: String
+    NoEcho: true
+    Description: Shared secret for X-API-Key header authentication
+    MinLength: 16
+  Environment:
+    Type: String
+    Default: prod
+    Description: Deployment environment name
+
+Globals:
+  Function:
+    Timeout: 15
+    MemorySize: 512
+    Runtime: python3.13
+
+Resources:
+  # DynamoDB Single Table
+  ProjectsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-table"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # HTTP API Gateway
+  ProjectTrackerApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowMethods:
+          - GET
+          - POST
+          - PATCH
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - "*"
+        AllowOrigins:
+          - "*"
+
+  # Lambda Function
+  ProjectTrackerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: app.main.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ProjectsTable
+          API_KEY: !Ref ApiKey
+          ENVIRONMENT: !Ref Environment
+      ReservedConcurrentExecutions: 5
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ProjectsTable
+      Events:
+        Root:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ProjectTrackerApi
+            Path: /
+            Method: ANY
+        Proxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ProjectTrackerApi
+            Path: /{proxy+}
+            Method: ANY
+
+  # CloudWatch Log Group with 14-day retention
+  ProjectTrackerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectTrackerFunction}"
+      RetentionInDays: 14
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the deployed HTTP API Gateway
+    Value: !Sub "https://${ProjectTrackerApi}.execute-api.${AWS::Region}.amazonaws.com"
+  HealthUrl:
+    Description: Unauthenticated health check endpoint
+    Value: !Sub "https://${ProjectTrackerApi}.execute-api.${AWS::Region}.amazonaws.com/health"
+  DocsUrl:
+    Description: Interactive OpenAPI documentation (disabled when Environment=prod)
+    Value: !Sub "https://${ProjectTrackerApi}.execute-api.${AWS::Region}.amazonaws.com/docs"
+  TableName:
+    Description: DynamoDB Table Name
+    Value: !Ref ProjectsTable

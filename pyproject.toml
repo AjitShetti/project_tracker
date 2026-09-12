@@ -23,3 +23,19 @@ dev = [
     "moto[dynamodb]",
     "ruff",
 ]
+
+[tool.pytest.ini_options]
+# app/ now lives under src/ so that CodeUri: src/ packages only deployable
+# code. Put it on sys.path for tests, which still import `app.*`.
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "RET"]
+ignore = ["B008"]  # Allow FastAPI Depends and Query in function argument defaults
+

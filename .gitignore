@@ -7,6 +7,12 @@ wheels/
 *.egg-info
 
 # Virtual environments
-.venv
+.venv/
+.env
 
-BUILD.md
+# AWS SAM build artifacts
+.aws-sam/
+
+# Caches and testing
+.pytest_cache/
+.ruff_cache/

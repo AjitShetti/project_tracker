@@ -1,0 +1,20 @@
+version = 0.1
+
+[default]
+[default.global.parameters]
+stack_name = "side-project-tracker"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+region = "ap-south-1"
+parameter_overrides = "Environment=\"prod\""
+image_repositories = []
+
+[default.local_start_api.parameters]
+warm_containers = "EAGER"
